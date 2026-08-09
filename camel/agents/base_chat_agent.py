@@ -299,6 +299,7 @@ class BaseChatAgent(BaseAgent):
         tool_execution_timeout: Optional[float] = None,
         retry_attempts: int = 3,
         retry_delay: float = 1.0,
+        response_retry_attempts: int = 2,
         step_timeout: Optional[float] = None,
     ) -> None:
         """Configure an async agent whose ``AgentMemory`` is never processed.
@@ -366,6 +367,7 @@ class BaseChatAgent(BaseAgent):
         self.tool_execution_timeout = tool_execution_timeout
         self.retry_attempts = max(1, retry_attempts)
         self.retry_delay = max(0.0, retry_delay)
+        self.response_retry_attempts = max(0, response_retry_attempts)
         self.step_timeout = step_timeout
         self.terminated = False
         self.termination_reason = TerminationReason.NOT_TERMINATED
@@ -467,6 +469,8 @@ class BaseChatAgent(BaseAgent):
             "total_tokens": 0,
             "error_type": None,
             "error_message": None,
+            "response_retry_count": 0,
+            "response_retry_reasons": [],
         }
 
     def _get_full_tool_schemas(self) -> List[Dict[str, Any]]:
@@ -541,9 +545,10 @@ class BaseChatAgent(BaseAgent):
     ) -> ChatAgentResponse:
         """Run model and sequential tool turns until the step terminates.
 
-        Each raw assistant response is stored before its requested tools run;
-        every tool result is then appended in request order before the next
-        model call.
+        Each usable assistant response is stored before its requested tools
+        run. Server-declared malformed or length-cut responses are discarded
+        and followed by a user retry; every tool result is appended in request
+        order before the next model call.
         """
         tool_call_records: List[ToolCallingRecord] = []
         usage = self._create_token_usage_tracker()
@@ -559,11 +564,6 @@ class BaseChatAgent(BaseAgent):
             self.meta_info_record["iteration_count"] += 1
 
             completion = cast(ChatCompletion, response.response)
-            raw_assistant = completion.choices[0].message.model_dump(
-                exclude_none=True
-            )
-            raw_assistant["role"] = "assistant"
-            self._write_openai_message(cast(OpenAIMessage, raw_assistant))
             self._update_token_usage_tracker(usage, response.usage_dict)
             for key in usage:
                 self.meta_info_record[key] = usage[key]
@@ -580,6 +580,43 @@ class BaseChatAgent(BaseAgent):
                     TerminationReason.CONTEXT_WINDOW_OVERFLOW
                 )
                 break
+
+            retry_reason = self._response_retry_reason(completion)
+            if retry_reason is not None:
+                retry_reasons = self.meta_info_record[
+                    "response_retry_reasons"
+                ]
+                retry_reasons.append(retry_reason)
+                self.meta_info_record["response_retry_count"] = len(
+                    retry_reasons
+                )
+                if len(retry_reasons) > self.response_retry_attempts:
+                    error = ModelProcessingError(
+                        "Assistant response remained incomplete or malformed "
+                        f"after {self.response_retry_attempts} retries: "
+                        f"{retry_reason}"
+                    )
+                    self.terminated = True
+                    self._set_termination(
+                        TerminationReason.MAX_TOKENS_REACHED
+                        if retry_reason == "length"
+                        else TerminationReason.UNCLASSIFIED_ERROR,
+                        error,
+                    )
+                    raise error
+                self._write_openai_message(
+                    {
+                        "role": "user",
+                        "content": self._response_retry_message(retry_reason),
+                    }
+                )
+                continue
+
+            raw_assistant = completion.choices[0].message.model_dump(
+                exclude_none=True
+            )
+            raw_assistant["role"] = "assistant"
+            self._write_openai_message(cast(OpenAIMessage, raw_assistant))
 
             requests = list(response.tool_call_requests or [])
             if not requests:
@@ -629,6 +666,32 @@ class BaseChatAgent(BaseAgent):
             msgs=response.output_messages,
             terminated=self.terminated,
             info=info,
+        )
+
+    @staticmethod
+    def _response_retry_reason(response: ChatCompletion) -> Optional[str]:
+        """Return a server-declared retry reason for an unusable response."""
+        choice = response.choices[0]
+        meta_info = getattr(choice, "meta_info", None)
+        if isinstance(meta_info, dict):
+            reason = meta_info.get("miles_response_parse_error")
+            if reason:
+                return str(reason)
+        if str(choice.finish_reason) == "length":
+            return "length"
+        return None
+
+    @staticmethod
+    def _response_retry_message(reason: str) -> str:
+        if reason == "length":
+            return (
+                "Your previous response was cut off and was not executed. "
+                "Retry with a shorter, complete response. If calling a tool, "
+                "emit one complete valid tool call."
+            )
+        return (
+            "Your previous response was malformed and was not executed. "
+            "Retry with one complete valid tool call or a final answer."
         )
 
     async def _aget_model_response(

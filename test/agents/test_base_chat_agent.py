@@ -27,12 +27,10 @@ from camel.agents.base_chat_agent import BaseChatAgent, TerminationReason
 from camel.agents.chat_agent import ChatAgent
 from camel.memories import AgentMemory
 from camel.messages import OpenAIMessage
+from camel.models import ModelProcessingError
 from camel.models.stub_model import StubModel
 from camel.types import (
     ChatCompletion,
-    ChatCompletionMessage,
-    Choice,
-    CompletionUsage,
     ModelType,
 )
 
@@ -55,28 +53,32 @@ class SequencedModel(StubModel):
         return self.responses.pop(0)
 
 
-def completion(content=None, tool_calls=None):
-    return ChatCompletion(
-        id="test-id",
-        model="test-model",
-        object="chat.completion",
-        created=int(time.time()),
-        choices=[
-            Choice(
-                index=0,
-                finish_reason="tool_calls" if tool_calls else "stop",
-                message=ChatCompletionMessage(
-                    role="assistant",
-                    content=content,
-                    tool_calls=tool_calls,
-                ),
-            )
+def completion(content=None, tool_calls=None, *, finish_reason=None, meta_info=None):
+    payload = {
+        "id": "test-id",
+        "model": "test-model",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": finish_reason
+                or ("tool_calls" if tool_calls else "stop"),
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": tool_calls,
+                },
+                **({"meta_info": meta_info} if meta_info else {}),
+            }
         ],
-        usage=CompletionUsage(
-            prompt_tokens=4, completion_tokens=2, total_tokens=6
-        ),
-    )
-
+        "usage": {
+            "prompt_tokens": 4,
+            "completion_tokens": 2,
+            "total_tokens": 6,
+        },
+    }
+    return ChatCompletion.model_validate(payload)
 
 @pytest.mark.asyncio
 async def test_append_only_agent_executes_tool_with_unprocessed_memory():
@@ -281,18 +283,91 @@ async def test_multiple_tool_calls_execute_sequentially_without_a_cap():
 
 @pytest.mark.asyncio
 async def test_length_finish_reason_tracks_output_token_limit():
-    response = completion(content="truncated")
-    response.choices[0].finish_reason = "length"
+    response = completion(content="truncated", finish_reason="length")
     agent = BaseChatAgent(
         model=SequencedModel([response]),
         token_limit=100,
+        response_retry_attempts=0,
         step_timeout=None,
     )
 
-    result = await agent.astep("write")
+    with pytest.raises(ModelProcessingError, match="remained incomplete"):
+        await agent.astep("write")
 
-    assert result.terminated
     assert agent.termination_reason is TerminationReason.MAX_TOKENS_REACHED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_response", "reason_fragment"),
+    [
+        (completion(content="truncated", finish_reason="length"), "cut off"),
+        (
+            completion(
+                content="",
+                meta_info={"miles_response_parse_error": "malformed_tool_json"},
+            ),
+            "malformed",
+        ),
+    ],
+)
+async def test_unusable_response_is_discarded_and_retried_as_user(
+    first_response, reason_fragment
+):
+    backend = SequencedModel([first_response, completion(content="done")])
+    agent = BaseChatAgent(
+        model=backend,
+        token_limit=100,
+        response_retry_attempts=1,
+        step_timeout=None,
+    )
+
+    result = await agent.astep("work")
+
+    assert result.msgs[0].content == "done"
+    assert [message["role"] for message in agent.message_list] == [
+        "user",
+        "user",
+        "assistant",
+    ]
+    assert reason_fragment in agent.message_list[1]["content"]
+    assert [message["role"] for message in backend.received[1]] == [
+        "user",
+        "user",
+    ]
+    assert agent.meta_info_record["response_retry_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_malformed_retry_never_executes_a_tool_and_exhaustion_raises():
+    calls = 0
+
+    def should_not_run(command: str):
+        nonlocal calls
+        calls += 1
+        return command
+
+    malformed = completion(
+        content="",
+        meta_info={"miles_response_parse_error": "malformed_tool_json"},
+    )
+    agent = BaseChatAgent(
+        model=SequencedModel([malformed, malformed]),
+        tools=[should_not_run],
+        token_limit=100,
+        response_retry_attempts=1,
+        step_timeout=None,
+    )
+
+    with pytest.raises(ModelProcessingError, match="remained incomplete"):
+        await agent.astep("work")
+
+    assert calls == 0
+    assert [message["role"] for message in agent.message_list] == [
+        "user",
+        "user",
+    ]
+    assert agent.termination_reason is TerminationReason.UNCLASSIFIED_ERROR
 
 
 @pytest.mark.asyncio
