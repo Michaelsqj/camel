@@ -22,6 +22,7 @@ import json
 import random
 import time
 import uuid
+from dataclasses import dataclass
 from enum import Enum
 from typing import (
     Any,
@@ -72,6 +73,19 @@ from camel.utils.tool_result import ToolResult
 logger = get_logger(__name__)
 
 _RAW_OPENAI_MESSAGE_KEY = "_base_chat_agent_raw_openai_message"
+
+
+@dataclass(frozen=True)
+class ResponseFeedback:
+    """Optional user feedback requested after preserving a model response."""
+
+    reason: str
+    content: str
+
+
+ResponseFeedbackHandler = Callable[
+    [ChatCompletion], Optional[ResponseFeedback]
+]
 
 
 class _AppendOnlyContextCreator(BaseContextCreator):
@@ -299,6 +313,8 @@ class BaseChatAgent(BaseAgent):
         tool_execution_timeout: Optional[float] = None,
         retry_attempts: int = 3,
         retry_delay: float = 1.0,
+        response_feedback_handler: Optional[ResponseFeedbackHandler] = None,
+        max_response_feedback: int = 2,
         step_timeout: Optional[float] = None,
     ) -> None:
         """Configure an async agent whose ``AgentMemory`` is never processed.
@@ -366,6 +382,8 @@ class BaseChatAgent(BaseAgent):
         self.tool_execution_timeout = tool_execution_timeout
         self.retry_attempts = max(1, retry_attempts)
         self.retry_delay = max(0.0, retry_delay)
+        self.response_feedback_handler = response_feedback_handler
+        self.max_response_feedback = max(0, max_response_feedback)
         self.step_timeout = step_timeout
         self.terminated = False
         self.termination_reason = TerminationReason.NOT_TERMINATED
@@ -467,6 +485,8 @@ class BaseChatAgent(BaseAgent):
             "total_tokens": 0,
             "error_type": None,
             "error_message": None,
+            "response_feedback_count": 0,
+            "response_feedback_reasons": [],
         }
 
     def _get_full_tool_schemas(self) -> List[Dict[str, Any]]:
@@ -551,24 +571,28 @@ class BaseChatAgent(BaseAgent):
         last_prompt_tokens = 0
 
         while True:
-            response = await self._aget_model_response(
+            completion = await self._aget_model_response(
                 self.message_list,
                 response_format=response_format,
                 tool_schemas=self._get_full_tool_schemas(),
             )
             self.meta_info_record["iteration_count"] += 1
 
-            completion = cast(ChatCompletion, response.response)
             raw_assistant = completion.choices[0].message.model_dump(
                 exclude_none=True
             )
             raw_assistant["role"] = "assistant"
             self._write_openai_message(cast(OpenAIMessage, raw_assistant))
-            self._update_token_usage_tracker(usage, response.usage_dict)
+
+            response = self._parse_model_response(completion)
+            completion_usage = (
+                safe_model_dump(completion.usage) if completion.usage else {}
+            )
+            self._update_token_usage_tracker(usage, completion_usage)
             for key in usage:
                 self.meta_info_record[key] = usage[key]
             last_prompt_tokens = int(
-                response.usage_dict.get("prompt_tokens") or 0
+                completion_usage.get("prompt_tokens") or 0
             )
 
             if (
@@ -580,6 +604,34 @@ class BaseChatAgent(BaseAgent):
                     TerminationReason.CONTEXT_WINDOW_OVERFLOW
                 )
                 break
+
+            feedback = (
+                self.response_feedback_handler(completion)
+                if self.response_feedback_handler is not None
+                else None
+            )
+            if feedback is not None:
+                reasons = self.meta_info_record["response_feedback_reasons"]
+                reasons.append(feedback.reason)
+                self.meta_info_record["response_feedback_count"] = len(reasons)
+                if len(reasons) > self.max_response_feedback:
+                    error = ModelProcessingError(
+                        "Assistant response still required feedback after "
+                        f"{self.max_response_feedback} attempts: "
+                        f"{feedback.reason}"
+                    )
+                    self.terminated = True
+                    self._set_termination(
+                        TerminationReason.MAX_TOKENS_REACHED
+                        if feedback.reason == "length"
+                        else TerminationReason.UNCLASSIFIED_ERROR,
+                        error,
+                    )
+                    raise error
+                self._write_openai_message(
+                    {"role": "user", "content": feedback.content}
+                )
+                continue
 
             requests = list(response.tool_call_requests or [])
             if not requests:
@@ -593,8 +645,8 @@ class BaseChatAgent(BaseAgent):
             self.meta_info_record["max_tool_calls_per_turn"] = max(
                 self.meta_info_record["max_tool_calls_per_turn"], len(requests)
             )
-            records = await self._aexecute_tools(requests)
-            for record in records:
+            for request in requests:
+                record = await self._aexecute_tool(request)
                 tool_call_records.append(record)
                 self._write_openai_message(
                     {
@@ -636,8 +688,8 @@ class BaseChatAgent(BaseAgent):
         messages: List[OpenAIMessage],
         response_format: Optional[Type[BaseModel]],
         tool_schemas: List[Dict[str, Any]],
-    ) -> ModelResponse:
-        """Call the backend with rate-limit retries and parse one response."""
+    ) -> ChatCompletion:
+        """Return one raw completion after rate-limit retries."""
         last_error: Optional[BaseException] = None
         for attempt in range(self.retry_attempts):
             try:
@@ -664,15 +716,13 @@ class BaseChatAgent(BaseAgent):
             raise TypeError(
                 f"Expected ChatCompletion, got {type(raw).__name__}"
             )
-        return self._parse_model_response(raw)
+        return raw
 
     def _parse_model_response(self, response: ChatCompletion) -> ModelResponse:
         """Convert a completion into messages and ordered tool calls."""
         output_messages: List[BaseMessage] = []
         for choice in response.choices:
             message = choice.message
-            if not (message.content or message.tool_calls):
-                continue
             meta: Dict[str, Any] = {}
             if logprobs := handle_logprobs(choice):
                 meta["logprobs_info"] = logprobs
@@ -694,10 +744,26 @@ class BaseChatAgent(BaseAgent):
             function_tool_call = cast(
                 ChatCompletionMessageFunctionToolCall, tool_call
             )
+            try:
+                arguments = json.loads(function_tool_call.function.arguments)
+            except (TypeError, json.JSONDecodeError):
+                logger.warning(
+                    "Preserved assistant response but skipped unparseable "
+                    "arguments for tool call %s",
+                    function_tool_call.id,
+                )
+                continue
+            if not isinstance(arguments, dict):
+                logger.warning(
+                    "Preserved assistant response but skipped non-object "
+                    "arguments for tool call %s",
+                    function_tool_call.id,
+                )
+                continue
             requests.append(
                 ToolCallRequest(
                     tool_name=function_tool_call.function.name,
-                    args=json.loads(function_tool_call.function.arguments),
+                    args=arguments,
                     tool_call_id=function_tool_call.id,
                     extra_content=getattr(
                         function_tool_call, "extra_content", None
@@ -784,4 +850,4 @@ class BaseChatAgent(BaseAgent):
         return result.text if isinstance(result, ToolResult) else str(result)
 
 
-__all__ = ["BaseChatAgent", "TerminationReason"]
+__all__ = ["BaseChatAgent", "ResponseFeedback", "TerminationReason"]

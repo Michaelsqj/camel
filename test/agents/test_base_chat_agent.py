@@ -12,6 +12,7 @@
 # limitations under the License.
 # ========= Copyright 2023-2026 @ CAMEL-AI.org. All Rights Reserved. =========
 import asyncio
+import json
 import time
 from typing import Any, ClassVar, Dict, List, Optional, Type, cast
 
@@ -23,16 +24,18 @@ from openai.types.chat.chat_completion_message_function_tool_call import (
 from pydantic import BaseModel
 
 from camel.agents.base import BaseAgent
-from camel.agents.base_chat_agent import BaseChatAgent, TerminationReason
+from camel.agents.base_chat_agent import (
+    BaseChatAgent,
+    ResponseFeedback,
+    TerminationReason,
+)
 from camel.agents.chat_agent import ChatAgent
 from camel.memories import AgentMemory
 from camel.messages import OpenAIMessage
+from camel.models import ModelProcessingError
 from camel.models.stub_model import StubModel
 from camel.types import (
     ChatCompletion,
-    ChatCompletionMessage,
-    Choice,
-    CompletionUsage,
     ModelType,
 )
 
@@ -55,27 +58,34 @@ class SequencedModel(StubModel):
         return self.responses.pop(0)
 
 
-def completion(content=None, tool_calls=None):
-    return ChatCompletion(
-        id="test-id",
-        model="test-model",
-        object="chat.completion",
-        created=int(time.time()),
-        choices=[
-            Choice(
-                index=0,
-                finish_reason="tool_calls" if tool_calls else "stop",
-                message=ChatCompletionMessage(
-                    role="assistant",
-                    content=content,
-                    tool_calls=tool_calls,
-                ),
-            )
+def completion(
+    content=None, tool_calls=None, *, finish_reason=None, meta_info=None
+):
+    payload = {
+        "id": "test-id",
+        "model": "test-model",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": finish_reason
+                or ("tool_calls" if tool_calls else "stop"),
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": tool_calls,
+                },
+                **({"meta_info": meta_info} if meta_info else {}),
+            }
         ],
-        usage=CompletionUsage(
-            prompt_tokens=4, completion_tokens=2, total_tokens=6
-        ),
-    )
+        "usage": {
+            "prompt_tokens": 4,
+            "completion_tokens": 2,
+            "total_tokens": 6,
+        },
+    }
+    return ChatCompletion.model_validate(payload)
 
 
 @pytest.mark.asyncio
@@ -281,8 +291,7 @@ async def test_multiple_tool_calls_execute_sequentially_without_a_cap():
 
 @pytest.mark.asyncio
 async def test_length_finish_reason_tracks_output_token_limit():
-    response = completion(content="truncated")
-    response.choices[0].finish_reason = "length"
+    response = completion(content="truncated", finish_reason="length")
     agent = BaseChatAgent(
         model=SequencedModel([response]),
         token_limit=100,
@@ -293,6 +302,176 @@ async def test_length_finish_reason_tracks_output_token_limit():
 
     assert result.terminated
     assert agent.termination_reason is TerminationReason.MAX_TOKENS_REACHED
+    assert agent.message_list[-1] == {
+        "role": "assistant",
+        "content": "truncated",
+    }
+
+
+@pytest.mark.asyncio
+async def test_feedback_preserves_assistant_then_appends_user_correction():
+    def feedback(response: ChatCompletion):
+        meta = getattr(response.choices[0], "meta_info", None)
+        if isinstance(meta, dict) and meta.get("parse_error"):
+            return ResponseFeedback(
+                reason=str(meta["parse_error"]),
+                content="The response was malformed; try again.",
+            )
+        return None
+
+    first = completion(
+        content="partial response",
+        meta_info={"parse_error": "malformed_tool_json"},
+    )
+    backend = SequencedModel([first, completion(content="done")])
+    agent = BaseChatAgent(
+        model=backend,
+        token_limit=100,
+        response_feedback_handler=feedback,
+        max_response_feedback=1,
+        step_timeout=None,
+    )
+
+    result = await agent.astep("work")
+
+    assert result.msgs[0].content == "done"
+    assert [message["role"] for message in agent.message_list] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert agent.message_list[1]["content"] == "partial response"
+    assert [message["role"] for message in backend.received[1]] == [
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert agent.meta_info_record["response_feedback_count"] == 1
+    assert agent.meta_info_record["response_feedback_reasons"] == [
+        "malformed_tool_json"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_feedback_exhaustion_preserves_every_assistant_response():
+    def feedback(response: ChatCompletion):
+        del response
+        return ResponseFeedback(reason="malformed", content="Try again.")
+
+    agent = BaseChatAgent(
+        model=SequencedModel(
+            [completion(content="bad one"), completion(content="bad two")]
+        ),
+        token_limit=100,
+        response_feedback_handler=feedback,
+        max_response_feedback=1,
+        step_timeout=None,
+    )
+
+    with pytest.raises(ModelProcessingError, match="still required feedback"):
+        await agent.astep("work")
+
+    assert [message["role"] for message in agent.message_list] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert agent.message_list[-1]["content"] == "bad two"
+
+
+@pytest.mark.asyncio
+async def test_feedback_can_intercept_invalid_tool_json_after_raw_append():
+    malformed_call = ChatCompletionMessageFunctionToolCall(
+        id="bad-call",
+        type="function",
+        function=Function(name="echo", arguments='{"value":'),
+    )
+
+    def feedback(response: ChatCompletion):
+        tool_calls = response.choices[0].message.tool_calls or []
+        if not tool_calls:
+            return None
+        arguments = tool_calls[0].function.arguments
+        try:
+            json.loads(arguments)
+        except ValueError:
+            return ResponseFeedback(
+                reason="invalid_arguments_json",
+                content="Tool arguments were invalid JSON; try again.",
+            )
+        return None
+
+    backend = SequencedModel(
+        [completion(tool_calls=[malformed_call]), completion(content="done")]
+    )
+    agent = BaseChatAgent(
+        model=backend,
+        token_limit=100,
+        response_feedback_handler=feedback,
+        max_response_feedback=1,
+        step_timeout=None,
+    )
+
+    await agent.astep("work")
+
+    assert [message["role"] for message in agent.message_list] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert agent.message_list[1]["tool_calls"][0]["id"] == "bad-call"
+
+
+@pytest.mark.asyncio
+async def test_empty_assistant_is_not_filtered_from_response_or_memory():
+    agent = BaseChatAgent(
+        model=SequencedModel([completion(content="")]),
+        token_limit=100,
+        step_timeout=None,
+    )
+
+    result = await agent.astep("work")
+
+    assert len(result.msgs) == 1
+    assert result.msgs[0].content == ""
+    assert agent.message_list[-1] == {"role": "assistant", "content": ""}
+
+
+@pytest.mark.asyncio
+async def test_completed_tool_result_survives_later_step_timeout():
+    async def work(value: str):
+        if value == "slow":
+            await asyncio.sleep(1)
+        return value
+
+    calls = [
+        ChatCompletionMessageFunctionToolCall(
+            id=f"call-{value}",
+            type="function",
+            function=Function(
+                name="work", arguments=json.dumps({"value": value})
+            ),
+        )
+        for value in ("fast", "slow")
+    ]
+    agent = BaseChatAgent(
+        model=SequencedModel([completion(tool_calls=calls)]),
+        tools=[work],
+        token_limit=100,
+        step_timeout=0.05,
+    )
+
+    with pytest.raises(TimeoutError):
+        await agent.astep("work")
+
+    assert agent.message_list[-1] == {
+        "role": "tool",
+        "tool_call_id": "call-fast",
+        "content": "fast",
+    }
 
 
 @pytest.mark.asyncio
@@ -309,6 +488,7 @@ async def test_prompt_over_token_limit_tracks_context_overflow():
     assert (
         agent.termination_reason is TerminationReason.CONTEXT_WINDOW_OVERFLOW
     )
+    assert agent.message_list[-1]["content"] == "answer"
 
 
 @pytest.mark.asyncio
