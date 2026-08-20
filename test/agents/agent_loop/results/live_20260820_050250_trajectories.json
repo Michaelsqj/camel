@@ -1,0 +1,47 @@
+{
+  "plain_completion": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are concise."
+      },
+      {
+        "role": "user",
+        "content": "Reply with the single word: ready"
+      },
+      {
+        "content": "ready",
+        "role": "assistant",
+        "reasoning_content": "1.  **Analyze the Request:**\n    *   Input: \"Reply with the single word: ready\"\n    *   Constraint 1: Reply with a single word.\n    *   Constraint 2: The word must be \"ready\".\n\n2.  **Formulate the Output:**\n    *   Output: ready\n\n3.  **Verify Constraints:**\n    *   Is it a single word? Yes.\n    *   Is it the word \"ready\"? Yes.\n    *   No punctuation needed (or at least keep it strictly to the word if possible, but standard capitalization/punctuation is usually fine. To be perfectly safe and concise: \"Ready\" or \"ready\"). Let's use \"Ready.\" or just \"ready\". The prompt says \"ready\", so I will output exactly \"ready\"."
+      }
+    ],
+    "meta_info_record": {
+      "iteration_count": 1,
+      "termination_reason": "task_complete",
+      "max_tool_calls_per_turn": 0,
+      "total_tool_calls": 0,
+      "prompt_tokens": 24,
+      "completion_tokens": 170,
+      "total_tokens": 194,
+      "error_type": null,
+      "error_message": null,
+      "context_tokens": 194,
+      "invalid_tool_call_count": 0,
+      "feedback_events": [],
+      "response_feedback_count": 0,
+      "response_feedback_reasons": []
+    },
+    "finish_reasons": [
+      "stop"
+    ],
+    "cached_tokens": [
+      0
+    ],
+    "prompt_id_lens": [
+      24
+    ],
+    "output_id_lens": [
+      170
+    ]
+  }
+}

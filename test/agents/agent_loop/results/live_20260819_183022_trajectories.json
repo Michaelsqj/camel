@@ -1,0 +1,234 @@
+{
+  "plain_completion": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are concise."
+      },
+      {
+        "role": "user",
+        "content": "Reply with the single word: ready"
+      },
+      {
+        "content": "ready",
+        "role": "assistant",
+        "reasoning_content": "1.  **Analyze the Request:**\n    *   Input: \"Reply with the single word: ready\"\n    *   Constraint 1: Be concise.\n    *   Constraint 2: Reply with *only* the single word \"ready\".\n\n2.  **Formulate the Output:**\n    *   Output: ready\n\n3.  **Verify Constraints:**\n    *   Is it a single word? Yes.\n    *   Is it the word \"ready\"? Yes.\n    *   Is it concise? Yes.\n\n4.  **Final Output Generation:** ready"
+      }
+    ],
+    "meta_info_record": {
+      "iteration_count": 1,
+      "termination_reason": "task_complete",
+      "max_tool_calls_per_turn": 0,
+      "total_tool_calls": 0,
+      "prompt_tokens": 24,
+      "completion_tokens": 121,
+      "total_tokens": 145,
+      "error_type": null,
+      "error_message": null,
+      "context_tokens": 145,
+      "invalid_tool_call_count": 0,
+      "feedback_events": [],
+      "response_feedback_count": 0,
+      "response_feedback_reasons": []
+    },
+    "finish_reasons": [
+      "stop"
+    ],
+    "cached_tokens": [
+      0
+    ],
+    "prompt_id_lens": [
+      24
+    ],
+    "output_id_lens": [
+      121
+    ]
+  },
+  "tool_call_round_trip": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "Use the calc tool for arithmetic, then answer."
+      },
+      {
+        "role": "user",
+        "content": "Compute 391 * 17 using the calc tool."
+      },
+      {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "id": "call_cca449cd684f45d689039f66",
+            "function": {
+              "arguments": "{\"expression\": \"391 * 17\"}",
+              "name": "calc"
+            },
+            "type": "function",
+            "index": 0
+          }
+        ],
+        "reasoning_content": "The user wants me to compute 391 * 17 using the calc tool."
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_cca449cd684f45d689039f66",
+        "content": "6647"
+      },
+      {
+        "content": "The result of **391 \u00d7 17** is **6,647**.",
+        "role": "assistant",
+        "reasoning_content": "The result is 6647."
+      }
+    ],
+    "meta_info_record": {
+      "iteration_count": 2,
+      "termination_reason": "task_complete",
+      "max_tool_calls_per_turn": 1,
+      "total_tool_calls": 1,
+      "prompt_tokens": 429,
+      "completion_tokens": 60,
+      "total_tokens": 489,
+      "error_type": null,
+      "error_message": null,
+      "context_tokens": 262,
+      "invalid_tool_call_count": 0,
+      "feedback_events": [],
+      "response_feedback_count": 0,
+      "response_feedback_reasons": []
+    },
+    "finish_reasons": [
+      "tool_calls",
+      "stop"
+    ],
+    "cached_tokens": [
+      0,
+      192
+    ],
+    "prompt_id_lens": [
+      195,
+      234
+    ],
+    "output_id_lens": [
+      32,
+      28
+    ]
+  },
+  "length_truncation_feedback": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a writer."
+      },
+      {
+        "role": "user",
+        "content": "Write a 500-word essay about oceans."
+      },
+      {
+        "content": "",
+        "role": "assistant",
+        "reasoning_content": "1.  **Analyze the Request:**\n    *   **Topic:** Oceans.\n    *   **Format:** Essay.\n    *   **Length"
+      },
+      {
+        "role": "user",
+        "content": "Your previous response was cut off by the output-length limit and was preserved, but nothing was executed. Continue with a shorter, complete response."
+      },
+      {
+        "content": "",
+        "role": "assistant",
+        "reasoning_content": "1.  **Analyze the Request:**\n    *   **Topic:** Oceans.\n    *   **Length:** Around 500 words (the prompt"
+      }
+    ],
+    "meta_info_record": {
+      "iteration_count": 2,
+      "termination_reason": "max_tokens_reached",
+      "max_tool_calls_per_turn": 0,
+      "total_tool_calls": 0,
+      "prompt_tokens": 86,
+      "completion_tokens": 64,
+      "total_tokens": 150,
+      "error_type": null,
+      "error_message": null,
+      "context_tokens": 91,
+      "invalid_tool_call_count": 0,
+      "feedback_events": [
+        {
+          "iteration": 1,
+          "kind": "truncated",
+          "detail": null
+        },
+        {
+          "iteration": 2,
+          "kind": "truncated",
+          "detail": null
+        }
+      ],
+      "response_feedback_count": 2,
+      "response_feedback_reasons": [
+        "truncated",
+        "truncated"
+      ]
+    },
+    "finish_reasons": [
+      "length",
+      "length"
+    ],
+    "cached_tokens": [
+      0,
+      0
+    ],
+    "prompt_id_lens": [
+      27,
+      59
+    ],
+    "output_id_lens": [
+      32,
+      32
+    ]
+  },
+  "proactive_context_budget": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a writer."
+      },
+      {
+        "role": "user",
+        "content": "Write a long story about a lighthouse."
+      },
+      {
+        "content": "\n\n\n# The Keeper of Wreck Light\n\n## Part One: The Arrival\n\nThe boat rose and fell on the gray swells",
+        "role": "assistant",
+        "reasoning_content": "The user wants me to write a long story about a lighthouse. I'll create a rich, detailed narrative with compelling characters, setting, and themes. Let me craft something meaningful."
+      }
+    ],
+    "meta_info_record": {
+      "iteration_count": 1,
+      "termination_reason": "context_window_overflow",
+      "max_tool_calls_per_turn": 0,
+      "total_tool_calls": 0,
+      "prompt_tokens": 27,
+      "completion_tokens": 64,
+      "total_tokens": 91,
+      "error_type": null,
+      "error_message": null,
+      "context_tokens": 91,
+      "invalid_tool_call_count": 0,
+      "feedback_events": [],
+      "response_feedback_count": 0,
+      "response_feedback_reasons": []
+    },
+    "finish_reasons": [
+      "length"
+    ],
+    "cached_tokens": [
+      0
+    ],
+    "prompt_id_lens": [
+      27
+    ],
+    "output_id_lens": [
+      64
+    ]
+  }
+}

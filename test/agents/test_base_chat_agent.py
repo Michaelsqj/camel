@@ -295,6 +295,7 @@ async def test_length_finish_reason_tracks_output_token_limit():
     agent = BaseChatAgent(
         model=SequencedModel([response]),
         token_limit=100,
+        max_consecutive_length=0,
         step_timeout=None,
     )
 
@@ -369,9 +370,12 @@ async def test_feedback_exhaustion_preserves_every_assistant_response():
         step_timeout=None,
     )
 
-    with pytest.raises(ModelProcessingError, match="still required feedback"):
-        await agent.astep("work")
+    result = await agent.astep("work")
 
+    assert result.terminated
+    assert (
+        agent.termination_reason is TerminationReason.MALFORMED_TOOL_CALL
+    )
     assert [message["role"] for message in agent.message_list] == [
         "user",
         "assistant",
@@ -416,13 +420,18 @@ async def test_feedback_can_intercept_invalid_tool_json_after_raw_append():
 
     await agent.astep("work")
 
+    # Invalid arguments are answered with a tool-role error result anchored
+    # to the call id (never a silent skip), so every id stays paired.
     assert [message["role"] for message in agent.message_list] == [
         "user",
         "assistant",
-        "user",
+        "tool",
         "assistant",
     ]
     assert agent.message_list[1]["tool_calls"][0]["id"] == "bad-call"
+    assert agent.message_list[2]["tool_call_id"] == "bad-call"
+    assert "not a valid JSON object" in agent.message_list[2]["content"]
+    assert agent.meta_info_record["invalid_tool_call_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -476,8 +485,30 @@ async def test_completed_tool_result_survives_later_step_timeout():
 
 @pytest.mark.asyncio
 async def test_prompt_over_token_limit_tracks_context_overflow():
+    # The overflow guard runs before the NEXT request: a tool-calling turn
+    # over the limit executes its tools, then the loop stops instead of
+    # issuing a request that cannot fit. A final answer over the limit is
+    # TASK_COMPLETE — no further request is ever needed.
+    call = ChatCompletionMessageFunctionToolCall(
+        id="over",
+        type="function",
+        function=Function(name="echo", arguments='{"value": 1}'),
+    )
+
+    def echo(value: int) -> str:
+        r"""Echo.
+
+        Args:
+            value (int): Value.
+
+        Returns:
+            str: Echoed value.
+        """
+        return str(value)
+
     agent = BaseChatAgent(
-        model=SequencedModel([completion(content="answer")]),
+        model=SequencedModel([completion(tool_calls=[call])]),
+        tools=[echo],
         token_limit=3,
         step_timeout=None,
     )
@@ -488,7 +519,17 @@ async def test_prompt_over_token_limit_tracks_context_overflow():
     assert (
         agent.termination_reason is TerminationReason.CONTEXT_WINDOW_OVERFLOW
     )
-    assert agent.message_list[-1]["content"] == "answer"
+    assert agent.message_list[-1]["role"] == "tool"
+
+    finisher = BaseChatAgent(
+        model=SequencedModel([completion(content="answer")]),
+        token_limit=3,
+        step_timeout=None,
+    )
+    result = await finisher.astep("write")
+    assert not result.terminated
+    assert finisher.termination_reason is TerminationReason.TASK_COMPLETE
+    assert finisher.message_list[-1]["content"] == "answer"
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,19 @@ class ToolCallRequest(BaseModel):
     args: Dict[str, Any]
     tool_call_id: str
     extra_content: Optional[Dict[str, Any]] = None
+    # Position inside the assistant message's tool_calls array. Results are
+    # paired by position, never by id (some parsers round-trip model-emitted
+    # ids that can collide).
+    index: Optional[int] = None
+
+
+class InvalidToolCall(BaseModel):
+    r"""A tool call whose arguments failed client-side validation."""
+
+    tool_call_id: str
+    tool_name: Optional[str] = None
+    error: str
+    index: int
 
 
 class ModelResponse(BaseModel):
@@ -40,6 +53,7 @@ class ModelResponse(BaseModel):
         AsyncStream[ChatCompletionChunk],
     ]
     tool_call_requests: Optional[List[ToolCallRequest]]
+    invalid_tool_calls: Optional[List[InvalidToolCall]] = None
     output_messages: List[BaseMessage]
     finish_reasons: List[str]
     usage_dict: Dict[str, Any]

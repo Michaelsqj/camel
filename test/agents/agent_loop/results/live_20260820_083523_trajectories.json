@@ -1,0 +1,122 @@
+{
+  "multi_turn_prefix_cache": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "Use the calc tool for every arithmetic step. One call at a time."
+      },
+      {
+        "role": "user",
+        "content": "Compute (12+34), then multiply that result by 3, then subtract 7. Use the calc tool for each of the three steps, then answer."
+      },
+      {
+        "content": "I'll work through this step by step!\n\n**Step 1: Compute (12 + 34)**",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "id": "call_18e8d00474c64df69e16ebe9",
+            "function": {
+              "arguments": "{\"expression\": \"12 + 34\"}",
+              "name": "calc"
+            },
+            "type": "function",
+            "index": 0
+          }
+        ],
+        "reasoning_content": "The user wants me to compute three steps in sequence:\n1. (12+34)\n2. Multiply the result by 3\n3. Subtract 7 from that result\n\nStep 1 depends on nothing, but step 2 depends on step 1, and step 3 depends on step 2. So I need to do them one at a time."
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_18e8d00474c64df69e16ebe9",
+        "content": "46"
+      },
+      {
+        "content": "**Step 2: Multiply the result by 3**",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "id": "call_85ba9ea856ea495fa17635bc",
+            "function": {
+              "arguments": "{\"expression\": \"46 * 3\"}",
+              "name": "calc"
+            },
+            "type": "function",
+            "index": 0
+          }
+        ],
+        "reasoning_content": "The result of step 1 is 46. Now step 2: multiply by 3."
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_85ba9ea856ea495fa17635bc",
+        "content": "138"
+      },
+      {
+        "content": "**Step 3: Subtract 7**",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "id": "call_984a362efc2c45a1b4d0af6b",
+            "function": {
+              "arguments": "{\"expression\": \"138 - 7\"}",
+              "name": "calc"
+            },
+            "type": "function",
+            "index": 0
+          }
+        ],
+        "reasoning_content": "The result of step 2 is 138. Now step 3: subtract 7."
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_984a362efc2c45a1b4d0af6b",
+        "content": "131"
+      },
+      {
+        "content": "Here's the full breakdown:\n\n| Step | Operation | Result |\n|------|-----------|--------|\n| 1 | 12 + 34 | **46** |\n| 2 | 46 \u00d7 3 | **138** |\n| 3 | 138 \u2212 7 | **131** |\n\nThe final answer is **131**.",
+        "role": "assistant",
+        "reasoning_content": "The final result is 131."
+      }
+    ],
+    "meta_info_record": {
+      "iteration_count": 4,
+      "termination_reason": "task_complete",
+      "max_tool_calls_per_turn": 1,
+      "total_tool_calls": 3,
+      "prompt_tokens": 1375,
+      "completion_tokens": 276,
+      "total_tokens": 1651,
+      "error_type": null,
+      "error_message": null,
+      "context_tokens": 512,
+      "invalid_tool_call_count": 0,
+      "feedback_events": [],
+      "response_feedback_count": 0,
+      "response_feedback_reasons": []
+    },
+    "finish_reasons": [
+      "tool_calls",
+      "tool_calls",
+      "tool_calls",
+      "stop"
+    ],
+    "cached_tokens": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "prompt_id_lens": [
+      221,
+      335,
+      386,
+      433
+    ],
+    "output_id_lens": [
+      109,
+      46,
+      42,
+      79
+    ]
+  }
+}

@@ -1,0 +1,242 @@
+{
+  "plain_completion": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are concise."
+      },
+      {
+        "role": "user",
+        "content": "Reply with the single word: ready"
+      },
+      {
+        "content": "ready",
+        "role": "assistant",
+        "reasoning_content": "1.  **Analyze the Request:**\n    *   Input: \"Reply with the single word: ready\"\n    *   Constraint 1: Reply with a single word.\n    *   Constraint 2: The word must be \"ready\".\n\n2.  **Formulate the Output:**\n    *   Output: ready\n\n3.  **Verify Constraints:**\n    *   Is it a single word? Yes.\n    *   Is it the word \"ready\"? Yes.\n    *   No punctuation needed (or at least keep it strictly to the word if possible, but standard capitalization/punctuation is usually fine. To be perfectly safe and concise: \"Ready\" or \"ready\"). Let's use \"Ready.\" or just \"ready\". The prompt says \"ready\", so I will output exactly \"ready\"."
+      }
+    ],
+    "meta_info_record": {
+      "iteration_count": 1,
+      "termination_reason": "task_complete",
+      "max_tool_calls_per_turn": 0,
+      "total_tool_calls": 0,
+      "prompt_tokens": 24,
+      "completion_tokens": 170,
+      "total_tokens": 194,
+      "error_type": null,
+      "error_message": null,
+      "context_tokens": 194,
+      "invalid_tool_call_count": 0,
+      "feedback_events": [],
+      "response_feedback_count": 0,
+      "response_feedback_reasons": []
+    },
+    "finish_reasons": [
+      "stop"
+    ],
+    "cached_tokens": [
+      0
+    ],
+    "prompt_id_lens": [
+      24
+    ],
+    "output_id_lens": [
+      170
+    ]
+  },
+  "tool_call_round_trip": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "Use the calc tool for arithmetic, then answer."
+      },
+      {
+        "role": "user",
+        "content": "Compute 391 * 17 using the calc tool."
+      },
+      {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "id": "call_e2006c11f2c44768bd6a625c",
+            "function": {
+              "arguments": "{\"expression\": \"391 * 17\"}",
+              "name": "calc"
+            },
+            "type": "function",
+            "index": 0
+          }
+        ],
+        "reasoning_content": "The user wants me to compute 391 * 17 using the calc tool."
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_e2006c11f2c44768bd6a625c",
+        "content": "6647"
+      },
+      {
+        "content": "The result of **391 \u00d7 17** is **6,647**.",
+        "role": "assistant",
+        "reasoning_content": "The result is 6647."
+      }
+    ],
+    "meta_info_record": {
+      "iteration_count": 2,
+      "termination_reason": "task_complete",
+      "max_tool_calls_per_turn": 1,
+      "total_tool_calls": 1,
+      "prompt_tokens": 429,
+      "completion_tokens": 60,
+      "total_tokens": 489,
+      "error_type": null,
+      "error_message": null,
+      "context_tokens": 262,
+      "invalid_tool_call_count": 0,
+      "feedback_events": [],
+      "response_feedback_count": 0,
+      "response_feedback_reasons": []
+    },
+    "finish_reasons": [
+      "tool_calls",
+      "stop"
+    ],
+    "cached_tokens": [
+      0,
+      0
+    ],
+    "prompt_id_lens": [
+      195,
+      234
+    ],
+    "output_id_lens": [
+      32,
+      28
+    ]
+  },
+  "length_truncation_feedback": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a writer."
+      },
+      {
+        "role": "user",
+        "content": "Write a 500-word essay about oceans."
+      },
+      {
+        "content": "",
+        "role": "assistant",
+        "reasoning_content": "1.  **Analyze the Request:**\n    *   **Topic:** Oceans.\n    *   **Format:** Essay.\n    *   **Length"
+      },
+      {
+        "role": "user",
+        "content": "Your previous response was cut off by the output-length limit and was preserved, but nothing was executed. Continue with a shorter, complete response."
+      },
+      {
+        "content": "",
+        "role": "assistant",
+        "reasoning_content": "1.  **Analyze the Request:**\n    *   **Topic:** Oceans.\n    *   **Format:** Essay.\n    *   **Length"
+      }
+    ],
+    "meta_info_record": {
+      "iteration_count": 2,
+      "termination_reason": "max_tokens_reached",
+      "max_tool_calls_per_turn": 0,
+      "total_tool_calls": 0,
+      "prompt_tokens": 118,
+      "completion_tokens": 64,
+      "total_tokens": 182,
+      "error_type": null,
+      "error_message": null,
+      "context_tokens": 123,
+      "invalid_tool_call_count": 0,
+      "feedback_events": [
+        {
+          "iteration": 1,
+          "kind": "truncated",
+          "detail": null
+        },
+        {
+          "iteration": 2,
+          "kind": "truncated",
+          "detail": null
+        }
+      ],
+      "response_feedback_count": 2,
+      "response_feedback_reasons": [
+        "truncated",
+        "truncated"
+      ]
+    },
+    "finish_reasons": [
+      "length",
+      "length"
+    ],
+    "cached_tokens": [
+      0,
+      0
+    ],
+    "prompt_id_lens": [
+      27,
+      91
+    ],
+    "output_id_lens": [
+      32,
+      32
+    ]
+  },
+  "proactive_context_budget": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a writer."
+      },
+      {
+        "role": "user",
+        "content": "Write a long story about a lighthouse."
+      },
+      {
+        "content": "# The Keeper of Wreck Light\n\n## Part One: The Arrival\n\nThe boat rose and fell on the gray swells like",
+        "role": "assistant",
+        "reasoning_content": "The user wants me to write a long story about a lighthouse. I'll create a rich, detailed narrative with compelling characters, atmosphere, and themes. Let me craft something meaningful."
+      }
+    ],
+    "meta_info_record": {
+      "iteration_count": 1,
+      "termination_reason": "context_window_overflow",
+      "max_tool_calls_per_turn": 0,
+      "total_tool_calls": 0,
+      "prompt_tokens": 27,
+      "completion_tokens": 64,
+      "total_tokens": 91,
+      "error_type": null,
+      "error_message": null,
+      "context_tokens": 91,
+      "invalid_tool_call_count": 0,
+      "feedback_events": [
+        {
+          "iteration": 1,
+          "kind": "truncated",
+          "detail": null
+        }
+      ],
+      "response_feedback_count": 1,
+      "response_feedback_reasons": [
+        "truncated"
+      ]
+    },
+    "finish_reasons": [
+      "length"
+    ],
+    "cached_tokens": [
+      0
+    ],
+    "prompt_id_lens": [
+      27
+    ],
+    "output_id_lens": [
+      64
+    ]
+  }
+}
