@@ -1,0 +1,17 @@
+live suite — 2026-08-19T18:45:43.540178 — http://10.220.51.13:31001/v1
+      endpoint=http://10.220.51.13:31001/v1 models=['model']
+PASS  case_health_and_models
+PASS  case_plain_completion
+      turns=2 tools=1 final='The result of **391 × 17** is **6,647**.'
+      linearity=linear cached=[0, 192]
+PASS  case_tool_call_round_trip
+      linearity=linear cached=[0, 0]
+PASS  case_length_truncation_feedback
+PASS  case_proactive_context_budget
+      server behavior => context_window_overflow, prompt_tokens=300022
+PASS  case_oversized_prompt_behavior
+      turns=4 linearity=linear,linear,linear cached=[192, 320, 320, 384] prompt_lens=[221, 334, 385, 431]
+PASS  case_multi_turn_prefix_cache
+
+7/7 passed
+trajectories: /data/terminal_agent_miles/core/external/camel-session-parser/test/agents/agent_loop/results/live_20260819_184543_trajectories.json

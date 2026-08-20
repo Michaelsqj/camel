@@ -1,0 +1,15 @@
+live suite — 2026-08-20T08:15:10.980638 — http://10.220.51.13:31001/v1
+      server behavior => max_tokens_reached, prompt_tokens=300022
+PASS  case_oversized_prompt_behavior
+FAIL  case_multi_turn_prefix_cache
+Traceback (most recent call last):
+  File "/data/terminal_agent_miles/core/external/camel-session-parser/test/agents/agent_loop/live_suite.py", line 331, in main
+    await case()
+  File "/data/terminal_agent_miles/core/external/camel-session-parser/test/agents/agent_loop/live_suite.py", line 301, in case_multi_turn_prefix_cache
+    assert later and all(c > 0 for c in later), rec.cached_tokens
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: [0, 0, 0, 0]
+
+
+1/2 passed
+trajectories: /data/terminal_agent_miles/core/external/camel-session-parser/test/agents/agent_loop/results/live_20260820_081510_trajectories.json

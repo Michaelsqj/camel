@@ -1,0 +1,10 @@
+live suite — 2026-08-20T19:16:03.858093 — http://10.220.51.46:31000/v1
+PASS  case_plain_completion
+      turns=2 tools=1 final='The result of **391 × 17** is **6,647**.'
+      linearity=linear cached=[192, 192]
+PASS  case_tool_call_round_trip
+      linearity=linear cached=[0, 64]
+PASS  case_length_truncation_feedback
+
+3/3 passed
+trajectories: /data/terminal_agent_miles/core/external/camel-session-parser/test/agents/agent_loop/results/live_20260820_191603_trajectories.json

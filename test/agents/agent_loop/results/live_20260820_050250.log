@@ -1,0 +1,4 @@
+live suite — 2026-08-20T05:02:50.556369 — http://10.220.51.13:31001/v1
+      endpoint=http://10.220.51.13:31001/v1 models=['model']
+PASS  case_health_and_models
+PASS  case_plain_completion

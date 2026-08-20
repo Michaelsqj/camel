@@ -1,0 +1,61 @@
+offline suite — 2026-08-19T18:29:02.560905
+PASS  case_normal_tool_loop
+FAIL  case_zero_arg_convention
+Traceback (most recent call last):
+  File "/data/terminal_agent_miles/core/external/camel-session-parser/test/agents/agent_loop/offline_suite.py", line 536, in main
+    await case()
+  File "/data/terminal_agent_miles/core/external/camel-session-parser/test/agents/agent_loop/offline_suite.py", line 185, in case_zero_arg_convention
+    completion(tool_calls=[tc("c1", "shell", raw)],
+    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+               finish_reason="tool_calls"),
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/terminal_agent_miles/core/external/camel-session-parser/test/agents/agent_loop/offline_suite.py", line 73, in completion
+    return ChatCompletion.model_validate(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        {
+        ^
+    ...<10 lines>...
+        }
+        ^
+    )
+    ^
+  File "/data/terminal_agent_miles/core/external/camel-session-parser/.venv/lib/python3.13/site-packages/pydantic/main.py", line 716, in model_validate
+    return cls.__pydantic_validator__.validate_python(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        obj,
+        ^^^^
+    ...<5 lines>...
+        by_name=by_name,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+pydantic_core._pydantic_core.ValidationError: 3 validation errors for ChatCompletion
+choices.0.message.tool_calls.0.ChatCompletionMessageFunctionToolCall.function.arguments
+  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]
+    For further information visit https://errors.pydantic.dev/2.12/v/string_type
+choices.0.message.tool_calls.0.ChatCompletionMessageCustomToolCall.custom
+  Field required [type=missing, input_value={'id': 'c1', 'type': 'fun...ll', 'arguments': None}}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+choices.0.message.tool_calls.0.ChatCompletionMessageCustomToolCall.type
+  Input should be 'custom' [type=literal_error, input_value='function', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.12/v/literal_error
+
+PASS  case_invalid_args_then_recover
+PASS  case_mixed_valid_invalid_positional
+PASS  case_consecutive_malformed_exhaustion
+PASS  case_length_feedback_then_recover
+PASS  case_consecutive_length_exhaustion
+PASS  case_truncated_tool_calls_never_execute
+PASS  case_parser_failed_markup_marker
+PASS  case_markers_disabled_degrades_to_complete
+PASS  case_handler_hint_parser_failed
+PASS  case_proactive_token_budget
+PASS  case_overflow_400_graceful
+PASS  case_max_iteration_counts_feedback_turns
+PASS  case_max_iteration_answers_final_tools
+PASS  case_infra_retry_then_success
+PASS  case_infra_retry_exhaustion_raises
+PASS  case_counters_reset_on_valid_turn
+PASS  case_meta_recording_complete
+
+18/19 passed

@@ -1,0 +1,7 @@
+live suite — 2026-08-20T08:35:23.534906 — http://10.220.51.13:31001/v1
+      NOTE: no/partial prefix-cache hits [0, 0, 0, 0] (router affinity not controlled by this bare client)
+      turns=4 linearity=linear,linear,linear cached=[0, 0, 0, 0] prompt_lens=[221, 335, 386, 433]
+PASS  case_multi_turn_prefix_cache
+
+1/1 passed
+trajectories: /data/terminal_agent_miles/core/external/camel-session-parser/test/agents/agent_loop/results/live_20260820_083523_trajectories.json

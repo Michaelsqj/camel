@@ -1,0 +1,24 @@
+offline suite — 2026-08-20T19:25:57.144209
+PASS  case_normal_tool_loop
+PASS  case_zero_arg_convention
+PASS  case_invalid_args_then_recover
+PASS  case_mixed_valid_invalid_positional
+PASS  case_consecutive_malformed_exhaustion
+PASS  case_length_feedback_then_recover
+PASS  case_consecutive_length_exhaustion
+PASS  case_truncated_tool_calls_never_execute
+PASS  case_parser_failed_markup_marker
+PASS  case_markers_disabled_degrades_to_complete
+PASS  case_handler_hint_parser_failed
+PASS  case_proactive_token_budget
+PASS  case_complete_near_ceiling_is_task_complete
+PASS  case_truncated_at_ceiling_no_dangling_feedback
+PASS  case_overflow_400_graceful
+PASS  case_max_iteration_counts_feedback_turns
+PASS  case_max_iteration_answers_final_tools
+PASS  case_infra_retry_then_success
+PASS  case_infra_retry_exhaustion_raises
+PASS  case_counters_reset_on_valid_turn
+PASS  case_meta_recording_complete
+
+21/21 passed
