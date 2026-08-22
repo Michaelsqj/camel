@@ -310,6 +310,48 @@ async def case_multi_turn_prefix_cache():
     await model.aclose()
 
 
+async def case_compaction_live():
+    # A tight token_limit forces at least one compaction mid-task; the agent
+    # must summarize in-segment, hand off, and still finish the task.
+    model = make_model(max_tokens=256)
+    rec = TurnRecorder(); rec.hook(model)
+    agent = BaseChatAgent(
+        system_message=(
+            "Use the calc tool for every arithmetic step, one call at a "
+            "time. Before each call, restate every intermediate result so "
+            "far and the remaining steps."
+        ),
+        model=model,
+        tools=[calc],
+        token_limit=1000,
+        max_compactions=3,
+        max_iteration=20,
+        tool_markup_markers=["<tool_call>"],
+    )
+    result = await agent.astep(
+        "Compute step by step with the calc tool, one operation per call: "
+        "(1) 23+58, (2) result*7, (3) result-19, (4) result+123, "
+        "(5) result*2, (6) result-42. Then give the final number."
+    )
+    meta = agent.meta_info_record
+    log(f"      compactions={meta['compaction_count']} "
+        f"turns={meta['iteration_count']} tools={meta['total_tool_calls']} "
+        f"context_tokens={meta['context_tokens']} "
+        f"termination={agent.termination_reason.value}")
+    log(f"      segments={[len(seg) for seg in agent.compacted_segments]} "
+        f"live={len(agent.message_list)} "
+        f"full={len(agent.full_message_list)}")
+    assert meta["compaction_count"] >= 1, "expected at least one compaction"
+    assert agent.termination_reason is TerminationReason.TASK_COMPLETE
+    final = result.msgs[0].content if result.msgs else ""
+    assert "1300" in final, f"wrong answer: {final[:120]!r}"
+    # Each archived segment ends with the in-segment summary exchange.
+    for seg in agent.compacted_segments:
+        assert [m["role"] for m in seg[-2:]] == ["user", "assistant"]
+    save_trajectory("compaction_live", agent, rec)
+    await model.aclose()
+
+
 CASES = [
     case_health_and_models,
     case_plain_completion,
@@ -318,6 +360,7 @@ CASES = [
     case_proactive_context_budget,
     case_oversized_prompt_behavior,
     case_multi_turn_prefix_cache,
+    case_compaction_live,
 ]
 
 

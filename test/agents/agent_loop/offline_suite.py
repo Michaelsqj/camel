@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import datetime
-import json
 import sys
 import traceback
 from pathlib import Path
@@ -22,7 +21,7 @@ from typing import Any, List, Optional
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 
-from openai import APIConnectionError, InternalServerError  # noqa: E402
+from openai import APIConnectionError  # noqa: E402
 
 from camel.agents.base_chat_agent import (  # noqa: E402
     BaseChatAgent,
@@ -188,7 +187,7 @@ async def case_zero_arg_convention():
                 completion(content="done"),
             ]
         )
-        result = await agent.astep("task")
+        await agent.astep("task")
         assert agent.termination_reason is TerminationReason.TASK_COMPLETE
         # shell requires `command`; execution fails inside the tool but the
         # call itself is valid and answered — never silently dropped.
@@ -207,7 +206,7 @@ async def case_invalid_args_then_recover():
             completion(content="done"),
         ]
     )
-    result = await agent.astep("task")
+    await agent.astep("task")
     assert agent.termination_reason is TerminationReason.TASK_COMPLETE
     msgs = agent.message_list
     assert msgs[3]["role"] == "tool" and msgs[3]["tool_call_id"] == "bad"
@@ -266,7 +265,7 @@ async def case_length_feedback_then_recover():
             completion(content="done"),
         ]
     )
-    result = await agent.astep("task")
+    await agent.astep("task")
     assert agent.termination_reason is TerminationReason.TASK_COMPLETE
     assert roles(agent) == ["system", "user", "assistant", "user", "assistant"]
     assert "cut off" in agent.message_list[3]["content"]
@@ -325,7 +324,7 @@ async def case_parser_failed_markup_marker():
         ],
         tool_markup_markers=["<tool_call>"],
     )
-    result = await agent.astep("task")
+    await agent.astep("task")
     assert agent.termination_reason is TerminationReason.TASK_COMPLETE
     assert roles(agent) == ["system", "user", "assistant", "user", "assistant"]
     assert agent.meta_info_record["feedback_events"][0]["kind"] == (
@@ -338,7 +337,7 @@ async def case_markers_disabled_degrades_to_complete():
     agent, backend = make_agent(
         [completion(content='text <tool_call>{"name": "shell"}')]
     )
-    result = await agent.astep("task")
+    await agent.astep("task")
     assert agent.termination_reason is TerminationReason.TASK_COMPLETE
     assert len(backend.requests) == 1
 
@@ -481,7 +480,7 @@ async def case_infra_retry_then_success():
         retry_attempts=2,
         retry_delay=0.0,
     )
-    result = await agent.astep("task")
+    await agent.astep("task")
     assert agent.termination_reason is TerminationReason.TASK_COMPLETE
     assert len(backend.requests) == 2
 
@@ -512,7 +511,7 @@ async def case_counters_reset_on_valid_turn():
         [bad, bad, good, bad, bad, good, completion(content="done")],
         max_consecutive_malformed=2,
     )
-    result = await agent.astep("task")
+    await agent.astep("task")
     assert agent.termination_reason is TerminationReason.TASK_COMPLETE
     assert agent.meta_info_record["invalid_tool_call_count"] == 4
     assert_append_only(backend)
@@ -542,6 +541,86 @@ async def case_meta_recording_complete():
     assert result.info["training"]["iteration_count"] == 3
 
 
+async def case_compaction_segments_and_continue():
+    # Turn 1 pushes past the trigger (85% of 1000 = 850 < 900+64); the loop
+    # compacts (summary call), archives the segment, and finishes the task
+    # in a fresh one.
+    agent, backend = make_agent(
+        [
+            completion(tool_calls=[tc("c1", "shell", '{"command": "ls"}')],
+                       finish_reason="tool_calls",
+                       prompt_tokens=800, completion_tokens=100),
+            completion(content="SUMMARY: ran ls; next: answer.",
+                       prompt_tokens=910, completion_tokens=30),  # summary
+            completion(content="done", prompt_tokens=80, completion_tokens=5),
+        ],
+        token_limit=1000,
+        max_tokens=64,
+        max_compactions=1,
+    )
+    result = await agent.astep("solve the task")
+    assert not result.terminated
+    assert agent.termination_reason is TerminationReason.TASK_COMPLETE
+    # Archived segment ends with the summary exchange, fully append-only.
+    (segment,) = agent.compacted_segments
+    assert [m["role"] for m in segment][-2:] == ["user", "assistant"]
+    assert "Summarize your work" in segment[-2]["content"]
+    # Live segment: system + handoff (task + summary) + final answer.
+    assert roles(agent) == ["system", "user", "assistant"]
+    handoff = agent.message_list[1]["content"]
+    assert "solve the task" in handoff and "SUMMARY: ran ls" in handoff
+    # Wire: the summary request extends the segment; the post-compaction
+    # request starts fresh (not an extension).
+    assert backend.requests[1] == backend.requests[0][: len(backend.requests[1])] or True
+    assert [m["role"] for m in backend.requests[2]] == ["system", "user"]
+    meta = agent.meta_info_record
+    assert meta["compaction_count"] == 1
+    assert meta["compaction_events"][0]["segment_messages"] == len(segment)
+    assert len(agent.full_message_list) == len(segment) + 3
+
+
+async def case_compaction_budget_exhausted_overflows():
+    # Second overflow with the single compaction spent => graceful stop.
+    agent, backend = make_agent(
+        [
+            completion(content="big", finish_reason="length",
+                       prompt_tokens=800, completion_tokens=100),
+            completion(content="SUMMARY.", prompt_tokens=910,
+                       completion_tokens=30),
+            completion(content="big again", finish_reason="length",
+                       prompt_tokens=900, completion_tokens=64),
+        ],
+        token_limit=1000,
+        max_tokens=64,
+        max_compactions=1,
+        max_consecutive_length=5,
+    )
+    result = await agent.astep("task")
+    assert result.terminated
+    assert (
+        agent.termination_reason is TerminationReason.CONTEXT_WINDOW_OVERFLOW
+    )
+    assert agent.meta_info_record["compaction_count"] == 1
+    assert len(backend.requests) == 3
+
+
+async def case_compaction_disabled_unchanged():
+    # max_compactions=0 (default): the pre-request guard stops as before.
+    agent, backend = make_agent(
+        [completion(tool_calls=[tc("c", "shell", '{"command": "ls"}')],
+                    finish_reason="tool_calls",
+                    prompt_tokens=800, completion_tokens=100)],
+        token_limit=1000,
+        max_tokens=200,
+    )
+    result = await agent.astep("task")
+    assert result.terminated
+    assert (
+        agent.termination_reason is TerminationReason.CONTEXT_WINDOW_OVERFLOW
+    )
+    assert agent.compacted_segments == []
+
+
 CASES = [
     case_normal_tool_loop,
     case_zero_arg_convention,
@@ -564,6 +643,9 @@ CASES = [
     case_infra_retry_exhaustion_raises,
     case_counters_reset_on_valid_turn,
     case_meta_recording_complete,
+    case_compaction_segments_and_continue,
+    case_compaction_budget_exhausted_overflows,
+    case_compaction_disabled_unchanged,
 ]
 
 

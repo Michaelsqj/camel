@@ -22,7 +22,7 @@ import json
 import random
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
     Any,
@@ -131,6 +131,29 @@ class _AppendOnlyContextCreator(BaseContextCreator):
         # Token accounting is the server's usage report; a client-side
         # recount (wrong tokenizer, O(n) per access) adds nothing.
         return messages, 0
+
+
+@dataclass
+class _LoopState:
+    """Loop-carried state for one ``astep`` run."""
+
+    usage: Dict[str, int]
+    tool_call_records: List[ToolCallingRecord] = field(default_factory=list)
+    response: Optional[ModelResponse] = None
+    last_prompt_tokens: int = 0
+    # Last turn's total_tokens: under append-only linearity, an exact floor
+    # for the next prompt.
+    context_tokens: int = 0
+    consecutive_length: int = 0
+    consecutive_malformed: int = 0
+    pending_feedback: Optional[str] = None
+
+    def reset_segment(self) -> None:
+        """A fresh segment has no context floor, counters, or feedback."""
+        self.context_tokens = 0
+        self.consecutive_length = 0
+        self.consecutive_malformed = 0
+        self.pending_feedback = None
 
 
 class TerminationReason(str, Enum):
@@ -317,6 +340,8 @@ class BaseChatAgent(BaseAgent):
         tool_markup_markers: Optional[List[str]] = None,
         max_consecutive_length: Optional[int] = None,
         max_consecutive_malformed: Optional[int] = None,
+        max_compactions: int = 0,
+        compaction_trigger_ratio: float = 0.85,
     ) -> None:
         """Configure an async agent whose ``AgentMemory`` is never processed.
 
@@ -396,6 +421,14 @@ class BaseChatAgent(BaseAgent):
             if max_consecutive_malformed is None
             else max(0, max_consecutive_malformed)
         )
+        # Optional compaction: close the current linear segment with an
+        # in-context summary call and continue in a fresh one. 0 disables.
+        self.max_compactions = max(0, max_compactions)
+        if not 0.0 < compaction_trigger_ratio <= 1.0:
+            raise ValueError("compaction_trigger_ratio must be in (0, 1]")
+        self.compaction_trigger_ratio = compaction_trigger_ratio
+        self.compacted_segments: List[List[OpenAIMessage]] = []
+        self._task_text: str = ""
         self.step_timeout = step_timeout
         self.terminated = False
         self.termination_reason = TerminationReason.NOT_TERMINATED
@@ -418,6 +451,8 @@ class BaseChatAgent(BaseAgent):
         self.termination_reason = TerminationReason.NOT_TERMINATED
         self.last_error = None
         self.meta_info_record = self._new_meta_info()
+        self.compacted_segments = []
+        self._task_text = ""
         for backend in self.model_backend.models:
             reset = getattr(backend, "reset", None)
             if callable(reset):
@@ -499,6 +534,8 @@ class BaseChatAgent(BaseAgent):
             "error_message": None,
             "context_tokens": 0,
             "invalid_tool_call_count": 0,
+            "compaction_count": 0,
+            "compaction_events": [],
             "feedback_events": [],
             "response_feedback_count": 0,
             "response_feedback_reasons": [],
@@ -557,6 +594,7 @@ class BaseChatAgent(BaseAgent):
             input_message = BaseMessage.make_user_message(
                 role_name="User", content=input_message
             )
+        self._task_text = input_message.content or ""
         self._write_openai_message(input_message.to_openai_user_message())
 
         task = self._run_loop(response_format)
@@ -587,13 +625,30 @@ class BaseChatAgent(BaseAgent):
         "Tool call was not executed: arguments were not a valid JSON object "
         "({error}). Re-issue the call with valid JSON arguments."
     )
+    COMPACTION_SUMMARY_REQUEST = (
+        "Context is nearly full. Summarize your work so far for a handoff "
+        "to a fresh context: major actions and their results, key facts "
+        "(paths, configs, errors), current status, and the exact next "
+        "steps. Be specific and complete. Do not call tools."
+    )
+    COMPACTION_HANDOFF = (
+        "Task:\n{task}\n\n"
+        "Context was compacted. Summary of the work so far:\n{summary}\n\n"
+        "Continue the task from this state; re-verify critical facts with "
+        "tools when uncertain."
+    )
+
+    # ---- conductor ------------------------------------------------------
 
     async def _run_loop(
         self, response_format: Optional[Type[BaseModel]]
     ) -> ChatAgentResponse:
         """Run model and tool turns until the step terminates.
 
-        Invariants:
+        Each pass yields one model turn or records a ``TerminationReason``
+        — the termination state is the loop condition. Phases ①–⑥ are
+        overridable methods (see ``base_chat_agent_loop.png``) sharing
+        these invariants:
 
         * append-only: every raw assistant response is preserved before any
           interpretation, and recovery only ever appends messages — the
@@ -604,197 +659,206 @@ class BaseChatAgent(BaseAgent):
         * model-behavior outcomes return gracefully with a classified
           ``TerminationReason``; only infrastructure errors raise.
         """
-        tool_call_records: List[ToolCallingRecord] = []
-        usage = self._create_token_usage_tracker()
-        response: Optional[ModelResponse] = None
-        last_prompt_tokens = 0
-        context_tokens = 0
-        consecutive_length = 0
-        consecutive_malformed = 0
-
-        while True:
-            # Never issue a request that cannot fit: under append-only
-            # linearity the previous turn's total_tokens is an exact floor
-            # for the next prompt.
-            if context_tokens and self._next_request_would_overflow(
-                context_tokens
-            ):
-                self.terminated = True
-                self._set_termination(
-                    TerminationReason.CONTEXT_WINDOW_OVERFLOW
-                )
+        state = _LoopState(usage=self._create_token_usage_tracker())
+        while self.termination_reason is TerminationReason.NOT_TERMINATED:
+            completion = await self._aadmit_and_request(
+                state, response_format
+            )
+            if completion is None:  # gate terminated: turn budget, overflow
                 break
-            try:
-                completion = await self._aget_model_response(
-                    self.message_list,
-                    response_format=response_format,
-                    tool_schemas=self._get_full_tool_schemas(),
-                )
-            except BaseException as error:
-                # Backstop: the server rejected the prompt as too long
-                # (HTTP 400 naming the context length). Terminate gracefully;
-                # anything else is an infrastructure failure and raises.
-                if (
-                    TerminationReason.from_error(error)
-                    is TerminationReason.CONTEXT_WINDOW_OVERFLOW
-                ):
-                    self.terminated = True
-                    self._set_termination(
-                        TerminationReason.CONTEXT_WINDOW_OVERFLOW, error
-                    )
-                    break
-                raise
-            iteration = self.meta_info_record["iteration_count"] + 1
-            self.meta_info_record["iteration_count"] = iteration
-
-            # 1. Preserve the raw assistant message before interpretation.
-            raw_assistant = completion.choices[0].message.model_dump(
-                exclude_none=True
-            )
-            raw_assistant["role"] = "assistant"
-            self._write_openai_message(cast(OpenAIMessage, raw_assistant))
-
-            # 2. Account usage. Under append-only linearity the last
-            #    ``total_tokens`` is an exact floor for the next prompt.
-            response = self._parse_model_response(completion)
-            completion_usage = (
-                safe_model_dump(completion.usage) if completion.usage else {}
-            )
-            self._update_token_usage_tracker(usage, completion_usage)
-            for key in usage:
-                self.meta_info_record[key] = usage[key]
-            last_prompt_tokens = int(
-                completion_usage.get("prompt_tokens") or 0
-            )
-            context_tokens = int(completion_usage.get("total_tokens") or 0)
-            self.meta_info_record["context_tokens"] = context_tokens
-
+            response = self._preserve_and_account(completion, state)
             verdict, invalid, feedback = self._classify_response(
                 completion, response
             )
-
             if verdict == "complete":
                 self._set_termination(TerminationReason.TASK_COMPLETE)
-                break
+            elif verdict == "calls":
+                await self._aanswer_tool_calls(response, invalid, state)
+            else:  # truncated / parser_failed: preserved, nothing executed
+                self._stage_feedback(verdict, feedback, state)
+        return self._build_response(state)
 
-            if verdict in ("truncated", "parser_failed"):
-                # Preserved, nothing executed; append one corrective user
-                # message and retry, bounded by the consecutive budget.
-                if verdict == "truncated":
-                    consecutive_length += 1
-                    exhausted = (
-                        consecutive_length > self.max_consecutive_length
-                    )
-                    reason = TerminationReason.MAX_TOKENS_REACHED
-                    text = self.TRUNCATED_FEEDBACK
-                    detail = None
-                else:
-                    consecutive_malformed += 1
-                    exhausted = (
-                        consecutive_malformed > self.max_consecutive_malformed
-                    )
-                    reason = TerminationReason.MALFORMED_TOOL_CALL
-                    text = (
-                        feedback.content
-                        if feedback is not None
-                        else self.PARSER_FAILED_FEEDBACK
-                    )
-                    detail = feedback.reason if feedback is not None else None
-                self._record_feedback_event(iteration, verdict, detail)
-                if exhausted:
-                    self.terminated = True
-                    self._set_termination(reason)
-                    break
-                # Budgets before appending: never leave a trailing feedback
-                # message no model call will consume.
-                if self._next_request_would_overflow(context_tokens):
-                    self.terminated = True
-                    self._set_termination(
-                        TerminationReason.CONTEXT_WINDOW_OVERFLOW
-                    )
-                    break
-                if self._iteration_budget_exhausted(iteration):
-                    break
-                self._write_openai_message({"role": "user", "content": text})
-                continue
+    # ---- phase ① · admit & request: gate, budgets, compaction -----------
 
-            # verdict == "calls": answer every tool_call_id in positional
-            # order — real execution for valid calls, synthesized error
-            # results for invalid ones (a silently skipped id would make the
-            # next template render diverge from what the model sampled).
-            requests = list(response.tool_call_requests or [])
-            self.meta_info_record["max_tool_calls_per_turn"] = max(
-                self.meta_info_record["max_tool_calls_per_turn"],
-                len(requests) + len(invalid),
-            )
-            entries = sorted(
-                [(req.index or 0, req, None) for req in requests]
-                + [(bad.index, None, bad) for bad in invalid],
-                key=lambda entry: entry[0],
-            )
-            for _, request, bad in entries:
-                if request is not None:
-                    record = await self._aexecute_tool(request)
-                    tool_call_records.append(record)
-                    self._write_openai_message(
-                        {
-                            "role": "tool",
-                            "tool_call_id": record.tool_call_id,
-                            "content": self._tool_result_content(
-                                record.result
-                            ),
-                        }
-                    )
-                else:
-                    self._write_openai_message(
-                        {
-                            "role": "tool",
-                            "tool_call_id": bad.tool_call_id,
-                            "content": self.INVALID_ARGS_RESULT.format(
-                                error=bad.error
-                            ),
-                        }
-                    )
-            self.meta_info_record["total_tool_calls"] = len(tool_call_records)
+    async def _aadmit_and_request(
+        self,
+        state: _LoopState,
+        response_format: Optional[Type[BaseModel]],
+    ) -> Optional[ChatCompletion]:
+        """Single pre-request gate — "may another model call happen?".
 
-            if invalid:
-                self.meta_info_record["invalid_tool_call_count"] += len(
-                    invalid
+        Order: turn budget, compaction, hard token limit. Under append-only
+        linearity the previous turn's ``total_tokens`` is an exact floor
+        for the next prompt. Staged feedback is only appended once the gate
+        admits a call, so none ever dangles. Returns ``None`` after
+        recording a termination; raises only on infrastructure failure.
+        """
+        if self._iteration_budget_exhausted(
+            self.meta_info_record["iteration_count"]
+        ):
+            return None
+        try:
+            if state.context_tokens and self._should_compact(
+                state.context_tokens
+            ):
+                await self._acompact(state.usage)
+                state.reset_segment()
+            elif state.context_tokens and self._next_request_would_overflow(
+                state.context_tokens
+            ):
+                self._terminate(TerminationReason.CONTEXT_WINDOW_OVERFLOW)
+                return None
+            if state.pending_feedback is not None:
+                self._write_openai_message(
+                    {"role": "user", "content": state.pending_feedback}
                 )
-                self._record_feedback_event(
-                    iteration,
-                    "invalid_args",
-                    "; ".join(bad.error for bad in invalid),
+                state.pending_feedback = None
+            return await self._aget_model_response(
+                self.message_list,
+                response_format=response_format,
+                tool_schemas=self._get_full_tool_schemas(),
+            )
+        except BaseException as error:
+            # Backstop for the summary call and the main request alike:
+            # a context-length 400 terminates gracefully; anything else
+            # is an infrastructure failure and raises.
+            if (
+                TerminationReason.from_error(error)
+                is TerminationReason.CONTEXT_WINDOW_OVERFLOW
+            ):
+                self._terminate(
+                    TerminationReason.CONTEXT_WINDOW_OVERFLOW, error
                 )
-                consecutive_malformed += 1
-                if consecutive_malformed > self.max_consecutive_malformed:
-                    self.terminated = True
-                    self._set_termination(
-                        TerminationReason.MALFORMED_TOOL_CALL
-                    )
-                    break
-            else:
-                # A fully-valid turn proves the model recovered.
-                consecutive_length = 0
-                consecutive_malformed = 0
+                return None
+            raise
 
-            # Turn budget after answering: every id got its response.
-            if self._iteration_budget_exhausted(iteration):
-                break
+    def _iteration_budget_exhausted(self, iteration: int) -> bool:
+        """Enforce the turn budget; every model call counts."""
+        if self.max_iteration is None or iteration < self.max_iteration:
+            return False
+        self._terminate(TerminationReason.MAX_TOOL_ITERATIONS_REACHED)
+        return True
 
-        info = get_info_dict(
-            response.response_id if response is not None else None,
-            usage,
-            response.finish_reasons if response is not None else [],
-            last_prompt_tokens,
-            tool_call_records,
+    def _completion_token_budget(self) -> int:
+        """Output tokens to reserve for the next request (0 when unknown)."""
+        value = self.model_backend.model_config_dict.get("max_tokens")
+        return int(value) if isinstance(value, (int, float)) else 0
+
+    def _next_request_would_overflow(self, context_tokens: int) -> bool:
+        """Whether context so far plus the reserved output exceeds the limit."""
+        return (
+            self._token_limit is not None
+            and context_tokens + self._completion_token_budget()
+            > self._token_limit
         )
-        info["training"] = copy.deepcopy(self.meta_info_record)
-        return ChatAgentResponse(
-            msgs=list(response.output_messages) if response is not None else [],
-            terminated=self.terminated,
-            info=info,
+
+    def _should_compact(self, context_tokens: int) -> bool:
+        """Compact at a margin below the hard limit so the in-segment
+        summary call itself still fits."""
+        return (
+            self.meta_info_record["compaction_count"] < self.max_compactions
+            and self._token_limit is not None
+            and context_tokens + self._completion_token_budget()
+            > self._token_limit * self.compaction_trigger_ratio
         )
+
+    async def _acompact(self, usage: Dict[str, int]) -> None:
+        """Close the current linear segment and open a fresh one.
+
+        The summary request/response are ordinary append-only turns of the
+        closing segment, so the whole segment stays token-linear and
+        trainable. The archived transcript is kept in
+        ``compacted_segments``; the new segment starts from the system
+        message plus a deterministic handoff carrying the task and summary.
+        """
+        self._write_openai_message(
+            {"role": "user", "content": self.COMPACTION_SUMMARY_REQUEST}
+        )
+        completion = await self._aget_model_response(
+            self.message_list, response_format=None, tool_schemas=[]
+        )
+        summary_message = completion.choices[0].message.model_dump(
+            exclude_none=True
+        )
+        summary_message["role"] = "assistant"
+        self._write_openai_message(cast(OpenAIMessage, summary_message))
+        completion_usage = (
+            safe_model_dump(completion.usage) if completion.usage else {}
+        )
+        self._update_token_usage_tracker(usage, completion_usage)
+
+        segment = self.message_list
+        self.compacted_segments.append(segment)
+        self.meta_info_record["compaction_count"] += 1
+        self.meta_info_record["compaction_events"].append(
+            {
+                "iteration": self.meta_info_record["iteration_count"],
+                "segment_messages": len(segment),
+                "segment_tokens": int(
+                    completion_usage.get("total_tokens") or 0
+                ),
+            }
+        )
+
+        self.memory.clear()
+        if self._original_system_message is not None:
+            self._write_openai_message(
+                self._original_system_message.to_openai_system_message()
+            )
+        self._write_openai_message(
+            {
+                "role": "user",
+                "content": self.COMPACTION_HANDOFF.format(
+                    task=self._task_text,
+                    summary=summary_message.get("content")
+                    or summary_message.get("reasoning_content")
+                    or "",
+                ),
+            }
+        )
+
+    @property
+    def full_message_list(self) -> List[OpenAIMessage]:
+        """All compacted segments plus the live one, in order."""
+        messages: List[OpenAIMessage] = []
+        for segment in self.compacted_segments:
+            messages.extend(segment)
+        messages.extend(self.message_list)
+        return messages
+
+    # ---- phase ② · preserve & account -----------------------------------
+
+    def _preserve_and_account(
+        self, completion: ChatCompletion, state: _LoopState
+    ) -> ModelResponse:
+        """Preserve the raw assistant message, then fold in server usage.
+
+        Preservation precedes any interpretation; server ``usage`` is the
+        only token accounting.
+        """
+        self.meta_info_record["iteration_count"] += 1
+        raw_assistant = completion.choices[0].message.model_dump(
+            exclude_none=True
+        )
+        raw_assistant["role"] = "assistant"
+        self._write_openai_message(cast(OpenAIMessage, raw_assistant))
+
+        response = self._parse_model_response(completion)
+        state.response = response
+        completion_usage = (
+            safe_model_dump(completion.usage) if completion.usage else {}
+        )
+        self._update_token_usage_tracker(state.usage, completion_usage)
+        for key in state.usage:
+            self.meta_info_record[key] = state.usage[key]
+        state.last_prompt_tokens = int(
+            completion_usage.get("prompt_tokens") or 0
+        )
+        state.context_tokens = int(completion_usage.get("total_tokens") or 0)
+        self.meta_info_record["context_tokens"] = state.context_tokens
+        return response
+
+    # ---- phase ③ · classify ---------------------------------------------
 
     def _classify_response(
         self, completion: ChatCompletion, response: ModelResponse
@@ -820,26 +884,137 @@ class BaseChatAgent(BaseAgent):
                 return "parser_failed", invalid, feedback
         return "complete", invalid, None
 
-    def _iteration_budget_exhausted(self, iteration: int) -> bool:
-        """Enforce the turn budget; every model call counts."""
-        if self.max_iteration is None or iteration < self.max_iteration:
-            return False
-        self.terminated = True
-        self._set_termination(TerminationReason.MAX_TOOL_ITERATIONS_REACHED)
-        return True
+    # ---- phase ④ · answer tool calls ------------------------------------
 
-    def _completion_token_budget(self) -> int:
-        """Output tokens to reserve for the next request (0 when unknown)."""
-        value = self.model_backend.model_config_dict.get("max_tokens")
-        return int(value) if isinstance(value, (int, float)) else 0
+    async def _aanswer_tool_calls(
+        self,
+        response: ModelResponse,
+        invalid: List[InvalidToolCall],
+        state: _LoopState,
+    ) -> None:
+        """Answer every ``tool_call_id`` in positional order.
 
-    def _next_request_would_overflow(self, context_tokens: int) -> bool:
-        """Whether context so far plus the reserved output exceeds the limit."""
-        return (
-            self._token_limit is not None
-            and context_tokens + self._completion_token_budget()
-            > self._token_limit
+        Real execution for valid calls, synthesized error results for
+        invalid ones — a silently skipped id would make the next template
+        render diverge from what the model sampled.
+        """
+        requests = list(response.tool_call_requests or [])
+        self.meta_info_record["max_tool_calls_per_turn"] = max(
+            self.meta_info_record["max_tool_calls_per_turn"],
+            len(requests) + len(invalid),
         )
+        entries = sorted(
+            [(req.index or 0, req, None) for req in requests]
+            + [(bad.index, None, bad) for bad in invalid],
+            key=lambda entry: entry[0],
+        )
+        for _, request, bad in entries:
+            if request is not None:
+                record = await self._aexecute_tool(request)
+                state.tool_call_records.append(record)
+                self._write_openai_message(
+                    {
+                        "role": "tool",
+                        "tool_call_id": record.tool_call_id,
+                        "content": self._tool_result_content(record.result),
+                    }
+                )
+            else:
+                self._write_openai_message(
+                    {
+                        "role": "tool",
+                        "tool_call_id": bad.tool_call_id,
+                        "content": self.INVALID_ARGS_RESULT.format(
+                            error=bad.error
+                        ),
+                    }
+                )
+        self.meta_info_record["total_tool_calls"] = len(
+            state.tool_call_records
+        )
+
+        if invalid:
+            self.meta_info_record["invalid_tool_call_count"] += len(invalid)
+            self._record_feedback_event(
+                self.meta_info_record["iteration_count"],
+                "invalid_args",
+                "; ".join(bad.error for bad in invalid),
+            )
+            state.consecutive_malformed += 1
+            if state.consecutive_malformed > self.max_consecutive_malformed:
+                self._terminate(TerminationReason.MALFORMED_TOOL_CALL)
+        else:
+            # A fully-valid turn proves the model recovered.
+            state.consecutive_length = 0
+            state.consecutive_malformed = 0
+
+    # ---- phase ⑤ · stage feedback (in-context recovery) -----------------
+
+    def _stage_feedback(
+        self,
+        verdict: str,
+        feedback: Optional[ResponseFeedback],
+        state: _LoopState,
+    ) -> None:
+        """Stage one corrective user message for a preserved-but-unusable
+        turn, bounded by the consecutive budget; the gate appends it."""
+        if verdict == "truncated":
+            state.consecutive_length += 1
+            exhausted = state.consecutive_length > self.max_consecutive_length
+            reason = TerminationReason.MAX_TOKENS_REACHED
+            text = self.TRUNCATED_FEEDBACK
+            detail = None
+        else:  # parser_failed
+            state.consecutive_malformed += 1
+            exhausted = (
+                state.consecutive_malformed > self.max_consecutive_malformed
+            )
+            reason = TerminationReason.MALFORMED_TOOL_CALL
+            text = (
+                feedback.content
+                if feedback is not None
+                else self.PARSER_FAILED_FEEDBACK
+            )
+            detail = feedback.reason if feedback is not None else None
+        self._record_feedback_event(
+            self.meta_info_record["iteration_count"], verdict, detail
+        )
+        if exhausted:
+            self._terminate(reason)
+        else:
+            state.pending_feedback = text
+
+    # ---- phase ⑥ · build response ---------------------------------------
+
+    def _build_response(self, state: _LoopState) -> ChatAgentResponse:
+        """Assemble the final response with the training meta snapshot."""
+        response = state.response
+        info = get_info_dict(
+            response.response_id if response is not None else None,
+            state.usage,
+            response.finish_reasons if response is not None else [],
+            state.last_prompt_tokens,
+            state.tool_call_records,
+        )
+        info["training"] = copy.deepcopy(self.meta_info_record)
+        return ChatAgentResponse(
+            msgs=list(response.output_messages)
+            if response is not None
+            else [],
+            terminated=self.terminated,
+            info=info,
+        )
+
+    # ---- termination & event recording ----------------------------------
+
+    def _terminate(
+        self,
+        reason: TerminationReason,
+        error: Optional[BaseException] = None,
+    ) -> None:
+        """Mark a terminal (non-complete) outcome."""
+        self.terminated = True
+        self._set_termination(reason, error)
 
     def _record_feedback_event(
         self, iteration: int, kind: str, detail: Optional[str] = None
